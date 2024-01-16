@@ -155,7 +155,7 @@ class ProteomeDownloader:
             pbar = tqdm(list_url(ftps))
             for i, ftp in enumerate(pbar):
                 filename = "_".join(self.ids["name"][i].split(" ")[:2])
-                download(ftp, output_path + filename, pbar)  # TODO: unzip.
+                download(ftp, output_path + filename, pbar)
                 if unzip:
                     subprocess.run(['gunzip', os.path.join(output_path, filename + '_protein.faa.gz')])
 
