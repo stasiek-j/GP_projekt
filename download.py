@@ -3,10 +3,14 @@ Utilities for downloading data from NCBI's proteome database.
 """
 import logging
 import os
+import subprocess
+import urllib
+from urllib import request
 from urllib.parse import quote
 import requests as r
 import pandas as pd
 from requests import HTTPError
+from tqdm import tqdm
 
 
 class SequencesContainer:
@@ -57,18 +61,16 @@ class SequencesContainer:
                 logging.error(f'No uniprot ID found for')
         self.species['uniprot'] = uniprot
 
-
-
-
     def download(self):
         def _download(row: pd.Series):
             logging.info(f"\n{row['uniprot']} ")
-            rest_link_prot = f"https://rest.uniprot.org/uniprotkb/search?format=fasta&query=%28%28proteome%3A{str(row['uniprot'])}%29%29" #f"https://rest.uniprot.org/uniprotkb/stream?format=fasta&query=%28%28proteome%3{row['uniprot']}%29%29"
+            rest_link_prot = f"https://rest.uniprot.org/uniprotkb/search?format=fasta&query=%28%28proteome%3A{str(row['uniprot'])}%29%29"  # f"https://rest.uniprot.org/uniprotkb/stream?format=fasta&query=%28%28proteome%3{row['uniprot']}%29%29"
             with r.get(rest_link_prot, stream=True) as req:
                 try:
                     req.raise_for_status()
                     path = self.output_path
-                    path_file = os.path.join(self.output_path, row['organism'].replace('.', '_').replace(" ", "_") + '.fasta')
+                    path_file = os.path.join(self.output_path,
+                                             row['organism'].replace('.', '_').replace(" ", "_") + '.fasta')
                     try:
                         with open(path_file, 'wb') as f:
                             for chunk in req.iter_content(chunk_size=2 ** 20):
@@ -95,11 +97,74 @@ class SequencesContainer:
         logging.info(f'Saved species to file {self.output_path}/species.csv')
 
 
+class ProteomeDownloader:
+    def __init__(self, path, output_path='./data/'):
+        self.ftps = None
+        self.ids = pd.read_csv(path)
+        self.output_path = output_path
+        pass
+
+    def get_ftps(self, ids=None, key="assembly_accession"):
+        if ids is None:
+            ids = self.ids
+        # organisms = pd.read_csv("lcr_organisms.csv")
+        summary = pd.read_csv('assembly_summary', sep="\t")[["assembly_accession", "ftp_path"]]
+
+        ftps = []
+        for acc in ids:  # organisms["assembly_id"].values:
+            list_ftps = summary[summary[key] == acc]["ftp_path"].values.tolist()
+            ftps += list_ftps if list_ftps != [] else [""]
+
+        self.ftps = ftps
+
+        # organisms["ftp"] = ftps
+        # organisms.to_csv("lcr_organisms.csv")
+
+    def download_ftps(self, output_path='', unzip=True, n=-1):
+        if self.output_path:
+           output_path = self.output_path
+        def list_url(iterab):
+            return [x for x in iterab if isURL(x)]
+
+        def isURL(string):
+            """
+            Bardzo uproszczona funkcja czy url, ale na te potrzeby wystarcza
+            """
+            if string == string:
+                return string[:4] == 'http'
+            return False
+
+        def download(url, filename, pbar=None):
+            remote = '/' + url.split("/")[-1] + '_protein.faa.gz'
+            if pbar and logging.DEBUG >= logging.root.level:
+                pbar.set_description(url + remote)
+            else:
+                logging.debug(url + remote)
+            try:
+                request.urlretrieve(url + remote, filename + '_protein.faa.gz')
+            except (urllib.error.HTTPError, urllib.error.URLError):
+                logging.debug(f"HTTP error {url}")
+                pass
+
+        try:
+            assert self.ftps is not None, f"No ftps found"
+            for i, ftp in enumerate(list_url(self.ftps)):
+                download(ftp, output_path + str(i))
+        except AssertionError:
+            ftps = self.ids['ftp'][:n]
+            pbar = tqdm(list_url(ftps))
+            for i, ftp in enumerate(pbar):
+                filename = "_".join(self.ids["name"][i].split(" ")[:2])
+                download(ftp, output_path + filename, pbar)  # TODO: unzip.
+                if unzip:
+                    subprocess.run(['gunzip', os.path.join(output_path, filename + '_protein.faa.gz')])
+
+
 if __name__ == '__main__':
     logging.basicConfig()
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
-    sequences = SequencesContainer('test')
-    sequences.download()
-    sequences.save_species()
+    sequences = ProteomeDownloader('organisms.csv', 'data/EDF/')
+    sequences.download_ftps()
+    # sequences.save_species()
