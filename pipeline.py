@@ -1,5 +1,6 @@
 import gzip
 import logging
+import os
 import subprocess
 import argparse
 import shutil
@@ -8,7 +9,7 @@ from collections import defaultdict
 from typing import Dict, Tuple
 
 from download import ProteomeDownloader
-from tools import *
+from utils import *
 
 from Bio import SeqIO
 
@@ -16,19 +17,23 @@ TMP = tempfile.mkdtemp()
 PATH_TO_DUPTREE = '/home/stasiek/Pulpit/BIBS/GP/lab9/linux-i386/duptree'
 
 
-
-
-def get_clusters(merged: str, output: str = '', min_seq: int = 5) -> Tuple[Dict[str, List], Dict[str, int]]:
+def get_clusters(merged: str, output: str = '', min_seq: int = 4) -> Tuple[Dict[str, List], Dict[str, int]]:
     clusters_file = SeqIO.parse(merged, 'fasta')
     sizes = defaultdict(int)
     clusters = {}
+    organisms = defaultdict(int)
     curr = ''
     for seq in clusters_file:
         if not seq.seq:
             curr = seq.id
             clusters[curr] = []
         elif make_valid(seq.id) not in [x.id for x in clusters[curr]]:
-            seq.description = make_valid(seq.description)
+            left = seq.description.rfind('[')
+            right = seq.description.rfind(']')
+            organisms[seq.description[left: right + 1]] += 1
+            seq.id = seq.description[left: right + 1] + "_" + str(organisms[seq.description[left:right+1]])
+
+            # seq.description = seq.id
             seq.id = make_valid(seq.id)
             clusters[curr].append(seq)
             sizes[curr] += 1
@@ -42,7 +47,7 @@ def get_clusters(merged: str, output: str = '', min_seq: int = 5) -> Tuple[Dict[
     return clusters, sizes
 
 
-def get_1_1_clusters(clusters: Dict[str, List], output: str = '', min_seq: int = 3) \
+def get_1_1_clusters(clusters: Dict[str, List], output: str = '', min_seq: int = 4) \
         -> Tuple[Dict[str, List], Dict[str, int]]:
     ret_cl, ret_sizes = defaultdict(list), defaultdict(int)
     logging.debug(len(clusters))
@@ -71,7 +76,7 @@ def get_1_1_clusters(clusters: Dict[str, List], output: str = '', min_seq: int =
     return ret_cl, ret_sizes
 
 
-def align_family(clusters: List | str, tool: MultiAlignmentTool, cluster_name: str =''):
+def align_family(clusters: List | str, tool: MultiAlignmentTool, cluster_name: str = ''):
     if isinstance(clusters, List):
         cluste = os.path.join(TMP, 'clusters/', f'{cluster_name if cluster_name else "family"}.fasta')
         os.makedirs(os.path.dirname(cluste), exist_ok=True)
@@ -83,8 +88,8 @@ def align_family(clusters: List | str, tool: MultiAlignmentTool, cluster_name: s
     return tool(clusters, msas), msas
 
 
-def fasttree_family(msa: str, tool: FasttreeTool, cluster_name: str = ''):
-    output = os.path.join(TMP, 'fasttrees/', f'{cluster_name if cluster_name else "family"}_fasttree.fasta')
+def fasttree_family(msa: str, tool: TreeTool, cluster_name: str = '', name='fasttree'):
+    output = os.path.join(TMP, f'{name}s/', f'{cluster_name if cluster_name else "family"}_{name}.fasta')
     os.makedirs(os.path.dirname(output), exist_ok=True)
     try:
         return tool(msa, output)
@@ -93,8 +98,8 @@ def fasttree_family(msa: str, tool: FasttreeTool, cluster_name: str = ''):
         raise e
 
 
-def reconcile(trees: str, tool: SuperTreeTool | MajorityConsensusTool):
-    return tool(trees)
+def reconcile(trees: str, tool: SuperTreeTool | MajorityConsensusTool, pat=''):
+    return tool(trees, pat=pat)
 
 
 def align_and_tree(cls, _mafft, _fasttree, split='1_1/'):
@@ -119,7 +124,7 @@ if __name__ == '__main__':
     os.makedirs(debugging_path, exist_ok=True)
     downloader = ProteomeDownloader('organisms.csv', debugging_path)
     logger.debug("Created downloader")
-    downloader.download_ftps(n=5, unzip=True)
+    downloader.download_ftps(unzip=True, n=4)
     logger.info("Downloaded proteomes")
 
     logger.info("Starting clustering:")
@@ -149,19 +154,20 @@ if __name__ == '__main__':
     mafft = MAFFTool('', {})
     logger.debug("Created mafft tool.")
 
-    fasttree = FasttreeTool('fasttree', {})
-    logger.debug("Created fasttree tool.")
+    fasttree = FasttreeTool('fasttreeMP', {})
+    raxml = RAxMLTool('/home/stasiek/Pulpit/BIBS/GP/standard-RAxML/raxmlHPC-PTHREADS-AVX', {'-T': '6'})
+    logger.debug("Created tree tool.")
 
-    align_and_tree(cls, mafft, fasttree, 'paralogs/')
+    align_and_tree(cls, mafft, raxml, 'paralogs/')
     logger.debug("Created alignments and trees for clusters with paralogs")
 
-    align_and_tree(cls_1_1, mafft, fasttree)
+    align_and_tree(cls_1_1, mafft, raxml)
     logger.debug("Created alignments and trees for clusters without paralogs")
     logger.info("Finished clustering and created trees using FastTree tool.")
 
     logger.info("Starting creating trees of genomes.")
 
-    merge_files(os.path.join(TMP, 'fasttrees/paralogs/'), output=os.path.join(TMP, 'merged.nwick'))
+    merge_files(os.path.join(TMP, 'fasttrees/paralogs/'), output=os.path.join(TMP, 'merged.nwick'), pat='bestTree')
     logger.debug(f"Merged files in {os.path.join(TMP, 'fasttrees/paralogs/')}")
 
     supertreetool = SuperTreeTool(PATH_TO_DUPTREE, {})
@@ -170,7 +176,7 @@ if __name__ == '__main__':
     consensus = MajorityConsensusTool('', {'schema': 'newick'})
     logger.debug("Created consensus tool.")
 
-    consensus_tree = reconcile(os.path.join(TMP, 'fasttrees/1_1/'), consensus)
+    consensus_tree = reconcile(os.path.join('/tmp/tmpc504etpk/', 'fasttrees/1_1/'), consensus, 'bestTree')
     logger.debug(consensus_tree)
     logger.info(f"Created consensus tree.\n{dendropy.Tree.as_ascii_plot(consensus_tree)}")
 
@@ -179,10 +185,8 @@ if __name__ == '__main__':
     logging.debug(supertree)
     logger.info(f"Created supertree.\n{dendropy.Tree.as_ascii_plot(supertree)}")
 
-    # os.remove(TMP)
+    os.rmdir(TMP)
     logger.info("Finished.")
-
-
 
     # # sequences = SequencesContainer(args.input_file, args.output_root)
     # # sequences.download()
@@ -206,5 +210,3 @@ if __name__ == '__main__':
     # # fasttree = FasttreeTool('fasttree', {})
     # # print(os.listdir('../../lab7/data/alignments'))
     # # fasttree('../../lab7/data/alignments', 'fasttree_out/')
-
-

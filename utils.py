@@ -22,21 +22,22 @@ def flatten(xss):
     return [x for xs in xss for x in xs]
 
 
-def merge_files(path, output=None):
+def merge_files(path, output=None, pat=''):
     if output is None:
         output = os.path.join(path, 'merged.fasta')
     with open(output, 'w+') as f:
         for file in os.listdir(path):
-            if os.path.isfile(os.path.join(path, file)):
+            if os.path.isfile(os.path.join(path, file)) and pat in file:
                 with open(os.path.join(path, file), 'r') as fr:
                     f.write(fr.read())
     return output
 
 
 def make_valid(s: str) -> str:
-    for character in [' ', '.', '-', '/', '(', ')']:
+    for character in [' ', '.', '-', '/', '(', ')', ":", ",", ")", "(", ";", "]", "[", "'"]:
         s = s.replace(character, "_")
     return s
+
 
 class Tool(ABC):
 
@@ -70,7 +71,6 @@ class Mmseq2(ClusterTool):
                 for file_in in f_in:
                     with open(file_in, "r") as fi:
                         fo.write(fi.read())
-
 
         mmseq2_path = self.path
         if isinstance(input_file, list):
@@ -109,7 +109,8 @@ class MAFFTool(MultiAlignmentTool):
         super().__init__(path, parameters)
 
     def __call__(self, input_file: str, output_file: str):
-        cline = Applications.MafftCommandline(input=input_file, **self.parameters)  # *flatten([(k, v) for k, v in self.parameters.items()]))
+        cline = Applications.MafftCommandline(input=input_file,
+                                              **self.parameters)  # *flatten([(k, v) for k, v in self.parameters.items()]))
         ret = cline()[0]
         msa_ob = AlignIO.read(StringIO(ret), 'fasta')
         if output_file:
@@ -130,7 +131,11 @@ class RAxMLTool(TreeTool):
         super().__init__(path, parameters)
 
     def __call__(self, aligned_file: str, output_path: str):
-        proc = subprocess.run([self.path, '-s', aligned_file, '-w', output_path, '-m', 'PROTGAMMAGTR', '-p', '12345'],
+        output_dir = os.path.dirname(output_path)
+        output_file = os.path.basename(output_path)[:-len('.fasta')]
+        proc = subprocess.run([self.path, '-s', aligned_file, '-w', output_dir, '-n', output_file, '-m',
+                               'PROTGAMMAGTR', '-p', '12345', *flatten([(k, v) for k, v
+                                                                        in self.parameters.items()])],
                               stdout=subprocess.PIPE, check=True)
         return proc
 
@@ -141,7 +146,8 @@ class FasttreeTool(TreeTool):
 
     def __call__(self, align_path: str, output_path: str):
         if os.path.isfile(align_path):
-            proc = subprocess.run([self.path, '-quiet', '-out', output_path, align_path, ], stdout=subprocess.PIPE, text=True,
+            proc = subprocess.run([self.path, '-quiet', '-out', output_path, align_path, ], stdout=subprocess.PIPE,
+                                  text=True,
                                   check=True)
             ret = proc.returncode
         elif os.path.isdir(align_path):
@@ -150,8 +156,9 @@ class FasttreeTool(TreeTool):
                 os.makedirs(output_path)
             ret = 0
             for file in tqdm(os.listdir(align_path)):
-                proc = subprocess.run([self.path, '-quiet',  '-out',
-                                       os.path.join(output_path, file), os.path.join(align_path, file)], stdout=subprocess.PIPE, text=True, check=True)
+                proc = subprocess.run([self.path, '-quiet', '-out',
+                                       os.path.join(output_path, file), os.path.join(align_path, file)],
+                                      stdout=subprocess.PIPE, text=True, check=True)
                 ret += proc.returncode
         else:
             ret = 1
@@ -163,11 +170,11 @@ class MajorityConsensusTool(TreeTool):
         super().__init__(path, parameters)
         assert 'schema' in self.parameters.keys(), 'schema must be one of parameters.'
 
-    def __call__(self, path):
+    def __call__(self, path,  pat=''):
         if os.path.isfile(path):
             trees = dendropy.TreeList.get(path=path, schema=self.parameters['schema'])
         elif os.path.isdir(path):
-            merged = merge_files(path, os.path.join(path, 'merged.newick'))
+            merged = merge_files(path, os.path.join(path, 'merged.newick'), pat=pat)
             # trees = dendropy.TreeList()
             # for filename in os.listdir(path):
             #     logging.debug(filename)
@@ -191,6 +198,3 @@ class SuperTreeTool(TreeTool):
 
         lines = proc.stdout.splitlines()
         return lines[-1]
-
-
-
