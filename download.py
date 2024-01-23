@@ -102,6 +102,7 @@ class ProteomeDownloader:
         self.ftps = None
         self.ids = pd.read_csv(path)
         self.output_path = output_path
+        self.count = 0
         pass
 
     def get_ftps(self, ids=None, key="assembly_accession"):
@@ -142,8 +143,10 @@ class ProteomeDownloader:
                 logging.debug(url + remote)
             try:
                 request.urlretrieve(url + remote, filename + '_protein.faa.gz')
+                return filename + '_protein.faa.gz'
             except (urllib.error.HTTPError, urllib.error.URLError):
                 logging.debug(f"HTTP error {url}")
+                return 0
                 pass
 
         try:
@@ -155,7 +158,8 @@ class ProteomeDownloader:
             pbar = tqdm(list_url(ftps))
             for i, ftp in enumerate(pbar):
                 filename = "_".join(self.ids["name"][i].split(" ")[:2])
-                download(ftp, output_path + filename, pbar)
+                if download(ftp, output_path + filename, pbar):
+                    self.count += 1
                 if unzip:
                     subprocess.run(['gunzip', os.path.join(output_path, filename + '_protein.faa.gz')])
 

@@ -6,15 +6,19 @@ Scripts for running bioinformatics tools using python interface.
 """
 import logging
 import os.path
+import re
+import tempfile
 from abc import ABC, abstractmethod
 import subprocess
 from io import StringIO
 from typing import List
 
+import Bio.Application
 import dendropy
 from Bio import AlignIO
 from Bio.Phylo.Consensus import majority_consensus
 from Bio.Align import Applications
+from Bio.Seq import Seq
 from tqdm import tqdm
 
 
@@ -78,10 +82,12 @@ class Mmseq2(ClusterTool):
             input_file = ['tmp_input']
         else:
             input_file = [input_file]
-        mmseq2_cmd = [mmseq2_path, 'easy-cluster'] + input_file + [output_file_prefix, 'tmp/',
+        tmpdir = tempfile.mkdtemp()
+        mmseq2_cmd = [mmseq2_path, 'easy-cluster'] + input_file + [output_file_prefix, tmpdir,
                                                                    *flatten([(k, v) for k, v
                                                                              in self.parameters.items()])]
         proc = subprocess.run(mmseq2_cmd, check=True)
+        subprocess.run(['rm', '-rf', tmpdir])
         return proc.returncode
 
 
@@ -110,9 +116,18 @@ class MAFFTool(MultiAlignmentTool):
 
     def __call__(self, input_file: str, output_file: str):
         cline = Applications.MafftCommandline(input=input_file,
-                                              **self.parameters)  # *flatten([(k, v) for k, v in self.parameters.items()]))
-        ret = cline()[0]
+                                              **self.parameters)
+        try:
+            ret = cline()[0]
+        except Bio.Application.ApplicationError:
+            return
         msa_ob = AlignIO.read(StringIO(ret), 'fasta')
+        m = []
+        for record in msa_ob:
+            record.seq = Seq(str(record.seq).replace("J", "X"))
+            m.append(record)
+
+        msa_ob = AlignIO.MultipleSeqAlignment(m)
         if output_file:
             AlignIO.write(msa_ob, output_file, 'fasta')
         return msa_ob
@@ -165,24 +180,71 @@ class FasttreeTool(TreeTool):
         return ret == 0
 
 
+class RapidNJTool(TreeTool):
+    def __init__(self, path: str, parameters: dict):
+        super().__init__(path, parameters)
+
+    def __call__(self, align_path: str, output_path: str):
+        def _bootstrap(path: str, b: int):
+            with open(path, 'r') as f:
+                data = f.read()
+            confs = [float(x[1:-1])/b for x in re.findall(r'\)\d+:', data)]
+            if sum(confs)/len(confs) < 0.75:
+                os.remove(path)
+                return 1
+            return 0
+
+        disc = 0
+        if os.path.isfile(align_path):
+            proc = subprocess.run([self.path, align_path, '-i', 'fa', '-n', '-x', output_path, *flatten([(k, v) for k, v
+                                                                                    in self.parameters.items()])])
+            # logging.debug("RapidNJTool finished, return code: {}".format(proc))
+            if int(self.parameters['-b']) > 1:
+                disc += _bootstrap(output_path, int(self.parameters['-b']))
+            ret = proc.returncode
+        elif os.path.isdir(align_path):
+            assert not os.path.isfile(output_path), 'Alignment path is a directory and output path is not'
+            if not os.path.exists(output_path):
+                os.makedirs(output_path)
+            ret = 0
+            for file in tqdm(os.listdir(align_path)):
+                proc = subprocess.run([self.path,
+                    os.path.join(align_path, file), '-i', 'fa', '-n', '-x', os.path.join(output_path, file),
+                    *flatten([(k, v) for k, v in self.parameters.items()])]
+                )
+                # logging.debug("RapidNJTool finished, return code: {}".format(proc))
+                ret += proc.returncode
+                if int(self.parameters['-b']) > 1:
+                    disc += _bootstrap(os.path.join(output_path, file), int(self.parameters['-b']))
+
+        else:
+            ret = 1
+
+        # logging.info(f'Discarded {disc} files with bootstrap')
+        return ret == 0, disc
+
+
 class MajorityConsensusTool(TreeTool):
     def __init__(self, path: str, parameters: dict):
         super().__init__(path, parameters)
         assert 'schema' in self.parameters.keys(), 'schema must be one of parameters.'
 
-    def __call__(self, path,  pat=''):
-        if os.path.isfile(path):
-            trees = dendropy.TreeList.get(path=path, schema=self.parameters['schema'])
-        elif os.path.isdir(path):
-            merged = merge_files(path, os.path.join(path, 'merged.newick'), pat=pat)
-            # trees = dendropy.TreeList()
-            # for filename in os.listdir(path):
-            #     logging.debug(filename)
-            #     if os.path.isfile(os.path.join(path, filename)):
-            #         trees.read_from_path(src=os.path.join(path, filename), schema=self.parameters['schema'],)
-            trees = dendropy.TreeList.get(path=merged, schema=self.parameters['schema'])
-        else:
-            raise FileNotFoundError("`path` must be file or directory containing trees to build consensus for.")
+    def __call__(self, path, pat=''):
+        try:
+            if os.path.isfile(path):
+                trees = dendropy.TreeList.get(path=path, schema=self.parameters['schema'])
+            elif os.path.isdir(path):
+                merged = merge_files(path, os.path.join(path, 'merged.newick'), pat=pat)
+                # trees = dendropy.TreeList()
+                # for filename in os.listdir(path):
+                #     logging.debug(filename)
+                #     if os.path.isfile(os.path.join(path, filename)):
+                #         trees.read_from_path(src=os.path.join(path, filename), schema=self.parameters['schema'],)
+                trees = dendropy.TreeList.get(path=merged, schema=self.parameters['schema'])
+            else:
+                raise FileNotFoundError("`path` must be file or directory containing trees to build consensus for.")
+        except FileNotFoundError:
+            return dendropy.Tree()
         logging.debug(trees.taxon_namespace)
         return trees.consensus()
 
@@ -191,10 +253,52 @@ class SuperTreeTool(TreeTool):
     def __init__(self, path: str, parameters: dict):
         super().__init__(path, parameters)
 
-    def __call__(self, tree_file):
-        print(tree_file)
-        proc = subprocess.run([self.path, "-i", tree_file, "--nogenetree"], stdout=subprocess.PIPE, text=True,
+    def __call__(self, tree_file, pat=''):
+        logging.debug(tree_file)
+        with open(tree_file, 'r') as f:
+            data = f.read()
+            # logging.debug(data)
+            data_re = re.sub(r'__\d+', "", data)
+        with open(tree_file, 'w') as f:
+            f.write(data_re)
+
+        proc = subprocess.run([self.path, "-i", tree_file, "--nogenetree", ], stdout=subprocess.PIPE, text=True,
                               check=True)
 
         lines = proc.stdout.splitlines()
         return lines[-1]
+
+
+class FasturecTreeTool(TreeTool):
+    def __init__(self, path: str, parameters: dict):
+        super().__init__(path, parameters)
+
+    def __call__(self, tree_file, pat=''):
+        with open(tree_file, 'r') as f:
+            data = f.read()
+        data = re.sub(r'[0-9]\.[0-9]+e-[0-9]+', lambda x: f"{float(x.group()): .9f}", data)
+        # print(data)
+        with open(tree_file, 'w') as f:
+            f.write(data)
+        sed = subprocess.run(["sed", "-i", "s/'//g", tree_file])
+        sed = subprocess.run(["sed", "-i", 's/__[0-9]\+//g', tree_file])
+        proc = subprocess.run([self.path, "-G", tree_file, "-Z", '-e', 'a', ], stdout=subprocess.PIPE, text=True,
+                              check=True)
+
+        with open('fu.txt') as f:
+            line = f.readline()
+        line = line.split(" ")[-1]
+
+        # pat = r'\(\w+, *\w+\)'
+        pat = r',\w+__set__'
+        # line = re.sub(pat, lambda x: f"{x.group().split(',')[0]}", line)
+        line = re.sub(pat, '', line)
+        pat = r'\w+__set__,'
+        line = re.sub(pat, '', line)
+        subprocess.run(['rm', 'fu.txt'])
+        return line + ';'
+
+
+if __name__ == '__main__':
+    test = FasturecTreeTool('../../fasturec/fasturec', {})
+    print(test('../../merged.newick'))
